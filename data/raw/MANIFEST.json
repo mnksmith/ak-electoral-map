@@ -1,0 +1,23 @@
+{
+  "precinct_boundaries": {
+    "bytes": 26799614,
+    "filename": "precincts.geojson",
+    "retrieved_at": "2026-04-24T14:31:48.104745+00:00",
+    "sha256": "d166b5535968029c928e1d7757de25f3bf6435207eda625cafe6c2a1a8c7b2a8",
+    "url": "https://gis.data.alaska.gov/datasets/DCCED::precincts.geojson"
+  },
+  "precinct_results": {
+    "bytes": 3645454,
+    "filename": "ENRbyPrecinct.csv",
+    "retrieved_at": "2026-04-24T14:31:41.931874+00:00",
+    "sha256": "aca7ab6e949d1319b48692ab8e8b694835ff6a9bd862fc9efbac91550c25f957",
+    "url": "https://www.elections.alaska.gov/results/24GENR/ENRbyPrecinct.csv"
+  },
+  "statewide_summary": {
+    "bytes": 276645,
+    "filename": "ElectionSummaryReport.pdf",
+    "retrieved_at": "2026-04-24T14:31:42.553056+00:00",
+    "sha256": "28ad3a6eac9a0976965995060f2223249f0a31d49da31fa1bfdcb4ee0a0d8953",
+    "url": "https://www.elections.alaska.gov/results/24GENR/ElectionSummaryReport.pdf"
+  }
+}

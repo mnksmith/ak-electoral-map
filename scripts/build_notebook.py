@@ -1,0 +1,322 @@
+"""Build notebooks/01_overperformance.ipynb from a declarative cell list.
+
+Keeping the notebook generator under version control means the .ipynb JSON
+round-trips cleanly and the source of truth for each cell is a readable Python
+string. Run:
+
+    uv run python scripts/build_notebook.py
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import nbformat as nbf
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+NOTEBOOK_PATH = REPO_ROOT / "notebooks" / "01_overperformance.ipynb"
+
+
+CELLS: list[tuple[str, str]] = [
+    (
+        "markdown",
+        """
+# Alaska 2024: Peltola overperformance vs. Harris
+
+This notebook is the end-to-end pipeline for v1 of the `ak-electoral-map`
+project. It fetches the 2024 general election data from the Alaska Division
+of Elections and the precinct shapefile from the AK GIS portal, joins them,
+computes Peltola-vs-Harris overperformance per precinct (and per House-District
+absentee cohort), and writes the static maps and top-N tables published in the
+repo.
+
+Running this notebook top-to-bottom reproduces everything under `outputs/` and
+`docs/`. It is safe to re-run — fetch is idempotent.
+        """.strip(),
+    ),
+    (
+        "code",
+        """
+from pathlib import Path
+
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from ak_electoral_map import clean, fetch, metrics
+
+REPO_ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
+OUTPUTS = REPO_ROOT / "outputs"
+MAPS = OUTPUTS / "maps"
+TABLES = OUTPUTS / "tables"
+DOCS = REPO_ROOT / "docs"
+for d in (MAPS, TABLES, DOCS):
+    d.mkdir(parents=True, exist_ok=True)
+        """.strip(),
+    ),
+    (
+        "markdown",
+        """
+## 1. Fetch raw data
+
+Downloads `ENRbyPrecinct.csv`, `ElectionSummaryReport.pdf`, and
+`precincts.geojson` into `data/raw/`. Cached on subsequent runs.
+        """.strip(),
+    ),
+    (
+        "code",
+        """
+manifest = fetch.fetch_all()
+pd.DataFrame(manifest).T[["filename", "bytes", "retrieved_at"]]
+        """.strip(),
+    ),
+    (
+        "markdown",
+        """
+## 2. Clean and join
+
+Produces a unified GeoDataFrame with 441 rows: 401 geographic precincts
+(election-day ballots) + 40 HD-absentee pseudo-precincts (Absentee + Early
+Voting + Question ballots aggregated per House District). HD-absentee rows use
+the dissolved HD polygon as their geometry.
+        """.strip(),
+    ),
+    (
+        "code",
+        """
+raw_gdf = clean.clean()
+clean.write_processed(raw_gdf)
+gdf = metrics.with_metrics(raw_gdf)
+gdf["row_type"].value_counts()
+        """.strip(),
+    ),
+    (
+        "markdown",
+        """
+## 3. Statewide sanity check
+
+Summed precinct + HD-absentee totals should match DoE certified totals within
+~400 votes (the HD99 "Fed Overseas" ballots are dropped — they have no home HD).
+        """.strip(),
+    ),
+    (
+        "code",
+        """
+summary = metrics.statewide_summary(gdf)
+pd.Series(summary).to_frame("value")
+        """.strip(),
+    ),
+    (
+        "markdown",
+        """
+## 4. Static maps
+
+Two views:
+
+- **Map A — `overperformance_pp`**: Peltola R1 share minus Harris share, in
+  percentage points. Diverging colormap centered on 0. Rows with no ballots
+  cast (empty precincts) are shown in grey.
+- **Map B — `splitticket_lb`**: lower-bound count of Peltola-Trump crossover
+  voters per unit. Sequential colormap, raw count.
+
+The HD-absentee rows are rendered as translucent polygons over the underlying
+precincts — visually distinct from the 401 precinct rows, which are drawn
+opaquely.
+        """.strip(),
+    ),
+    (
+        "code",
+        """
+# Project to Alaska Albers (EPSG:3338) so Aleutians don't crash into the
+# antimeridian and squish Alaska into a sliver. The raw shapefile is WGS84.
+gdf_ak = gdf.to_crs("EPSG:3338")
+
+def render_map(gdf, column, title, cmap, *, diverging=False, outfile):
+    precincts = gdf[gdf["row_type"] == "precinct"]
+    hd_abs = gdf[gdf["row_type"] == "hd_absentee"]
+
+    fig, ax = plt.subplots(figsize=(12, 9))
+    kwargs = dict(
+        column=column, ax=ax, cmap=cmap,
+        edgecolor="white", linewidth=0.1,
+        legend=True, legend_kwds={"label": title, "shrink": 0.6},
+        missing_kwds={"color": "lightgrey"},
+    )
+    if diverging:
+        bound = max(abs(gdf[column].min()), abs(gdf[column].max()))
+        kwargs.update(vmin=-bound, vmax=bound)
+    precincts.plot(**kwargs)
+    hd_abs.boundary.plot(ax=ax, edgecolor="black", linewidth=0.4, alpha=0.3)
+    ax.set_axis_off()
+    ax.set_title(title, fontsize=13, pad=12)
+    fig.tight_layout()
+    fig.savefig(outfile, dpi=150, bbox_inches="tight")
+    plt.show()
+
+render_map(
+    gdf_ak, "overperformance_pp",
+    "Peltola (2024 US House R1) minus Harris (2024 Pres), percentage points",
+    cmap="RdBu", diverging=True,
+    outfile=MAPS / "overperformance_pp.png",
+)
+        """.strip(),
+    ),
+    (
+        "code",
+        """
+render_map(
+    gdf_ak, "splitticket_lb",
+    "Lower-bound Peltola-Trump crossover voters per precinct (count)",
+    cmap="viridis", diverging=False,
+    outfile=MAPS / "splitticket_density.png",
+)
+        """.strip(),
+    ),
+    (
+        "markdown",
+        """
+## 5. Top-N tables
+
+Top 25 units by each metric, saved as CSV under `outputs/tables/`.
+        """.strip(),
+    ),
+    (
+        "code",
+        """
+tables = {
+    "top25_overperformance_pp_precincts.csv":
+        metrics.top_n(gdf, "overperformance_pp", n=25, row_type="precinct"),
+    "top25_splitticket_lb_precincts.csv":
+        metrics.top_n(gdf, "splitticket_lb", n=25, row_type="precinct"),
+    "top25_overperformance_pp_hd_absentee.csv":
+        metrics.top_n(gdf, "overperformance_pp", n=25, row_type="hd_absentee"),
+    "top25_splitticket_lb_hd_absentee.csv":
+        metrics.top_n(gdf, "splitticket_lb", n=25, row_type="hd_absentee"),
+}
+for name, df in tables.items():
+    df.to_csv(TABLES / name, index=False, float_format="%.3f")
+    print(f"wrote {name} ({len(df)} rows)")
+
+tables["top25_overperformance_pp_precincts.csv"].head(10)
+        """.strip(),
+    ),
+    (
+        "code",
+        """
+tables["top25_splitticket_lb_precincts.csv"].head(10)
+        """.strip(),
+    ),
+    (
+        "markdown",
+        """
+## 6. Interactive folium map
+
+Two toggleable layers (overperformance_pp, splitticket_lb), tooltips on every
+polygon, saved to `docs/index.html` for GitHub Pages.
+        """.strip(),
+    ),
+    (
+        "code",
+        """
+import branca.colormap as cm
+import folium
+
+# Project to WGS84 for folium. Simplify in a planar CRS (EPSG:3338, Alaska
+# Albers, meters) so the tolerance is meaningful; 200 m is fine at web zoom
+# levels and cuts the HTML from ~55 MB to ~3 MB.
+wgs = gdf.to_crs("EPSG:3338")
+wgs["geometry"] = wgs.geometry.simplify(200, preserve_topology=True)
+wgs = wgs.to_crs("EPSG:4326")
+wgs = wgs[~wgs.geometry.is_empty & wgs.geometry.notna()].copy()
+
+# Pre-round floats for cleaner tooltip display.
+for col in ["peltola_pct_r1", "harris_pct", "trump_pct", "overperformance_pp"]:
+    wgs[col] = wgs[col].round(2)
+
+# Center on Alaska.
+m = folium.Map(location=[63.0, -152.0], zoom_start=4, tiles="cartodbpositron")
+
+bound_pp = max(abs(wgs["overperformance_pp"].min()),
+               abs(wgs["overperformance_pp"].max()))
+pp_scale = cm.LinearColormap(
+    ["#b2182b", "#f7f7f7", "#2166ac"],
+    vmin=-bound_pp, vmax=bound_pp,
+    caption="Peltola R1 % − Harris % (percentage points)",
+)
+lb_max = float(wgs["splitticket_lb"].max())
+lb_scale = cm.LinearColormap(
+    ["#ffffcc", "#41b6c4", "#253494"],
+    vmin=0, vmax=lb_max,
+    caption="Peltola-Trump crossover voters (lower bound, count)",
+)
+
+def style_fn(metric, scale):
+    def _style(feature):
+        v = feature["properties"].get(metric)
+        return {
+            "fillColor": "#bbbbbb" if v is None else scale(v),
+            "color": "#000000" if feature["properties"]["row_type"] == "hd_absentee" else "#ffffff",
+            "weight": 0.8 if feature["properties"]["row_type"] == "hd_absentee" else 0.3,
+            "fillOpacity": 0.55 if feature["properties"]["row_type"] == "hd_absentee" else 0.75,
+            "dashArray": "5,3" if feature["properties"]["row_type"] == "hd_absentee" else None,
+        }
+    return _style
+
+tooltip_fields = [
+    "precinct_name", "row_type", "house_district",
+    "peltola_votes", "harris_votes",
+    "peltola_pct_r1", "harris_pct", "trump_pct",
+    "overperformance_pp", "splitticket_lb",
+]
+tooltip_aliases = [
+    "Unit:", "Type:", "House District:",
+    "Peltola R1 votes:", "Harris votes:",
+    "Peltola R1 %:", "Harris %:", "Trump %:",
+    "Peltola − Harris (pp):", "Split-ticket LB:",
+]
+
+folium.GeoJson(
+    wgs,
+    name="Peltola overperformance (pp)",
+    style_function=style_fn("overperformance_pp", pp_scale),
+    tooltip=folium.GeoJsonTooltip(fields=tooltip_fields, aliases=tooltip_aliases, localize=True),
+).add_to(m)
+
+folium.GeoJson(
+    wgs,
+    name="Peltola-Trump crossover (count)",
+    style_function=style_fn("splitticket_lb", lb_scale),
+    tooltip=folium.GeoJsonTooltip(fields=tooltip_fields, aliases=tooltip_aliases, localize=True),
+    show=False,
+).add_to(m)
+
+pp_scale.add_to(m)
+lb_scale.add_to(m)
+folium.LayerControl(collapsed=False).add_to(m)
+
+m.save(str(DOCS / "index.html"))
+print(f"wrote {DOCS / 'index.html'} ({(DOCS / 'index.html').stat().st_size // 1024} KB)")
+m
+        """.strip(),
+    ),
+]
+
+
+def main() -> None:
+    nb = nbf.v4.new_notebook()
+    nb.cells = [
+        nbf.v4.new_markdown_cell(src) if kind == "markdown" else nbf.v4.new_code_cell(src)
+        for kind, src in CELLS
+    ]
+    nb.metadata["kernelspec"] = {
+        "display_name": "Python 3",
+        "language": "python",
+        "name": "python3",
+    }
+    NOTEBOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    nbf.write(nb, NOTEBOOK_PATH)
+    print(f"wrote {NOTEBOOK_PATH}")
+
+
+if __name__ == "__main__":
+    main()
