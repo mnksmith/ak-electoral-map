@@ -2,7 +2,7 @@
 
 Precinct-level analysis of Alaska's 2024 general election, focused on **where Mary Peltola (US House, D) outperformed Kamala Harris (US President, D)** on the same ballot — i.e. the geography of Peltola-Trump split-ticket voters.
 
-> **Interactive map:** https://mnksmith.github.io/ak-electoral-map/ (enabled after first Pages build)
+> **Interactive map:** https://mattnksmith.com/ak-electoral-map/ (may take 1–2 min to go live after a push)
 
 ## Why
 
