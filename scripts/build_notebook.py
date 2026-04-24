@@ -130,11 +130,9 @@ opaquely.
 # Project to Alaska Albers (EPSG:3338) so Aleutians don't crash into the
 # antimeridian and squish Alaska into a sliver. The raw shapefile is WGS84.
 gdf_ak = gdf.to_crs("EPSG:3338")
+precincts_ak = gdf_ak[gdf_ak["row_type"] == "precinct"]
 
-def render_map(gdf, column, title, cmap, *, diverging=False, outfile):
-    precincts = gdf[gdf["row_type"] == "precinct"]
-    hd_abs = gdf[gdf["row_type"] == "hd_absentee"]
-
+def render_map(df, column, title, cmap, *, diverging=False, outfile):
     fig, ax = plt.subplots(figsize=(12, 9))
     kwargs = dict(
         column=column, ax=ax, cmap=cmap,
@@ -143,10 +141,9 @@ def render_map(gdf, column, title, cmap, *, diverging=False, outfile):
         missing_kwds={"color": "lightgrey"},
     )
     if diverging:
-        bound = max(abs(gdf[column].min()), abs(gdf[column].max()))
+        bound = max(abs(df[column].min()), abs(df[column].max()))
         kwargs.update(vmin=-bound, vmax=bound)
-    precincts.plot(**kwargs)
-    hd_abs.boundary.plot(ax=ax, edgecolor="black", linewidth=0.4, alpha=0.3)
+    df.plot(**kwargs)
     ax.set_axis_off()
     ax.set_title(title, fontsize=13, pad=12)
     fig.tight_layout()
@@ -154,7 +151,7 @@ def render_map(gdf, column, title, cmap, *, diverging=False, outfile):
     plt.show()
 
 render_map(
-    gdf_ak, "overperformance_pp",
+    precincts_ak, "overperformance_pp",
     "Peltola (2024 US House R1) minus Harris (2024 Pres), percentage points",
     cmap="RdBu", diverging=True,
     outfile=MAPS / "overperformance_pp.png",
@@ -165,7 +162,7 @@ render_map(
         "code",
         """
 render_map(
-    gdf_ak, "splitticket_lb",
+    precincts_ak, "splitticket_lb",
     "Lower-bound Peltola-Trump crossover voters per precinct (count)",
     cmap="viridis", diverging=False,
     outfile=MAPS / "splitticket_density.png",
@@ -211,8 +208,9 @@ tables["top25_splitticket_lb_precincts.csv"].head(10)
         """
 ## 6. Interactive folium map
 
-Two toggleable layers (overperformance_pp, splitticket_lb), tooltips on every
-polygon, saved to `docs/index.html` for GitHub Pages.
+Single choropleth layer of precinct `overperformance_pp`, with each
+precinct's tooltip also showing the HD-wide mail-in (absentee + early +
+question) Peltola/Harris shares for context. Saved to `docs/index.html`.
         """.strip(),
     ),
     (
@@ -221,20 +219,32 @@ polygon, saved to `docs/index.html` for GitHub Pages.
 import branca.colormap as cm
 import folium
 
-# Project to WGS84 for folium. Simplify in a planar CRS (EPSG:3338, Alaska
-# Albers, meters) so the tolerance is meaningful; 200 m is fine at web zoom
-# levels and cuts the HTML from ~55 MB to ~3 MB.
-wgs = gdf.to_crs("EPSG:3338")
+# Pull the HD-absentee rows out of the combined frame and reshape them into a
+# lookup table keyed on house_district, so each precinct's tooltip can surface
+# the mail-in numbers for its HD without needing a separate polygon layer.
+hd_absentee = gdf[gdf["row_type"] == "hd_absentee"].set_index("house_district")
+hd_mailin = hd_absentee[["peltola_pct_r1", "harris_pct", "overperformance_pp"]].rename(
+    columns={
+        "peltola_pct_r1": "hd_mailin_peltola_pct",
+        "harris_pct": "hd_mailin_harris_pct",
+        "overperformance_pp": "hd_mailin_overperformance_pp",
+    }
+).round(2)
+
+# Precinct rows only — the HD-absentee polygons are redundant with HD-wide
+# tooltip fields and were visually obscuring the precinct layer.
+precincts = gdf[gdf["row_type"] == "precinct"].merge(
+    hd_mailin, left_on="house_district", right_index=True, how="left"
+)
+
+# Simplify in a planar CRS (EPSG:3338, meters) so the tolerance is meaningful;
+# 200 m is fine at web zoom levels and cuts the HTML from ~55 MB to ~3 MB.
+wgs = precincts.to_crs("EPSG:3338")
 wgs["geometry"] = wgs.geometry.simplify(200, preserve_topology=True)
 wgs = wgs.to_crs("EPSG:4326")
 wgs = wgs[~wgs.geometry.is_empty & wgs.geometry.notna()].copy()
-
-# Pre-round floats for cleaner tooltip display.
 for col in ["peltola_pct_r1", "harris_pct", "trump_pct", "overperformance_pp"]:
     wgs[col] = wgs[col].round(2)
-
-# Center on Alaska.
-m = folium.Map(location=[63.0, -152.0], zoom_start=4, tiles="cartodbpositron")
 
 bound_pp = max(abs(wgs["overperformance_pp"].min()),
                abs(wgs["overperformance_pp"].max()))
@@ -243,56 +253,40 @@ pp_scale = cm.LinearColormap(
     vmin=-bound_pp, vmax=bound_pp,
     caption="Peltola R1 % − Harris % (percentage points)",
 )
-lb_max = float(wgs["splitticket_lb"].max())
-lb_scale = cm.LinearColormap(
-    ["#ffffcc", "#41b6c4", "#253494"],
-    vmin=0, vmax=lb_max,
-    caption="Peltola-Trump crossover voters (lower bound, count)",
-)
 
-def style_fn(metric, scale):
-    def _style(feature):
-        v = feature["properties"].get(metric)
-        return {
-            "fillColor": "#bbbbbb" if v is None else scale(v),
-            "color": "#000000" if feature["properties"]["row_type"] == "hd_absentee" else "#ffffff",
-            "weight": 0.8 if feature["properties"]["row_type"] == "hd_absentee" else 0.3,
-            "fillOpacity": 0.55 if feature["properties"]["row_type"] == "hd_absentee" else 0.75,
-            "dashArray": "5,3" if feature["properties"]["row_type"] == "hd_absentee" else None,
-        }
-    return _style
+def style_fn(feature):
+    v = feature["properties"].get("overperformance_pp")
+    return {
+        "fillColor": "#bbbbbb" if v is None else pp_scale(v),
+        "color": "#ffffff",
+        "weight": 0.3,
+        "fillOpacity": 0.75,
+    }
 
 tooltip_fields = [
-    "precinct_name", "row_type", "house_district",
+    "precinct_name", "house_district",
     "peltola_votes", "harris_votes",
     "peltola_pct_r1", "harris_pct", "trump_pct",
-    "overperformance_pp", "splitticket_lb",
+    "overperformance_pp",
+    "hd_mailin_peltola_pct", "hd_mailin_harris_pct",
+    "hd_mailin_overperformance_pp",
 ]
 tooltip_aliases = [
-    "Unit:", "Type:", "House District:",
+    "Precinct:", "House District:",
     "Peltola R1 votes:", "Harris votes:",
     "Peltola R1 %:", "Harris %:", "Trump %:",
-    "Peltola − Harris (pp):", "Split-ticket LB:",
+    "Peltola − Harris (pp):",
+    "HD mail-in Peltola R1 %:", "HD mail-in Harris %:",
+    "HD mail-in Peltola − Harris (pp):",
 ]
 
+m = folium.Map(location=[63.0, -152.0], zoom_start=4, tiles="cartodbpositron")
 folium.GeoJson(
     wgs,
-    name="Peltola overperformance (pp)",
-    style_function=style_fn("overperformance_pp", pp_scale),
+    style_function=style_fn,
     tooltip=folium.GeoJsonTooltip(fields=tooltip_fields, aliases=tooltip_aliases, localize=True),
 ).add_to(m)
-
-folium.GeoJson(
-    wgs,
-    name="Peltola-Trump crossover (count)",
-    style_function=style_fn("splitticket_lb", lb_scale),
-    tooltip=folium.GeoJsonTooltip(fields=tooltip_fields, aliases=tooltip_aliases, localize=True),
-    show=False,
-).add_to(m)
-
 pp_scale.add_to(m)
-lb_scale.add_to(m)
-folium.LayerControl(collapsed=False).add_to(m)
 
 m.save(str(DOCS / "index.html"))
 print(f"wrote {DOCS / 'index.html'} ({(DOCS / 'index.html').stat().st_size // 1024} KB)")
