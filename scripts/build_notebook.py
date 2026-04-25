@@ -132,7 +132,14 @@ opaquely.
 gdf_ak = gdf.to_crs("EPSG:3338")
 precincts_ak = gdf_ak[gdf_ak["row_type"] == "precinct"]
 
-def render_map(df, column, title, cmap, *, diverging=False, outfile):
+# Color-scale bound for the diverging overperformance map. Using ±|max| lets a
+# handful of tiny rural villages with +30 to +52 pp stretch the scale and wash
+# out the rest of the state. 2× the precinct-level median of overperformance_pp
+# gives a bound near the p75 of the distribution, so most precincts get real
+# color differentiation and only the ~top 8% saturate.
+pp_bound = round(2 * precincts_ak["overperformance_pp"].median(), 1)
+
+def render_map(df, column, title, cmap, *, bound=None, outfile):
     fig, ax = plt.subplots(figsize=(12, 9))
     kwargs = dict(
         column=column, ax=ax, cmap=cmap,
@@ -140,8 +147,7 @@ def render_map(df, column, title, cmap, *, diverging=False, outfile):
         legend=True, legend_kwds={"label": title, "shrink": 0.6},
         missing_kwds={"color": "lightgrey"},
     )
-    if diverging:
-        bound = max(abs(df[column].min()), abs(df[column].max()))
+    if bound is not None:
         kwargs.update(vmin=-bound, vmax=bound)
     df.plot(**kwargs)
     ax.set_axis_off()
@@ -152,8 +158,9 @@ def render_map(df, column, title, cmap, *, diverging=False, outfile):
 
 render_map(
     precincts_ak, "overperformance_pp",
-    "Peltola (2024 US House R1) minus Harris (2024 Pres), percentage points",
-    cmap="RdBu", diverging=True,
+    f"Peltola (2024 US House R1) minus Harris (2024 Pres), percentage points  "
+    f"(scale clipped at ±{pp_bound})",
+    cmap="RdBu", bound=pp_bound,
     outfile=MAPS / "overperformance_pp.png",
 )
         """.strip(),
@@ -164,7 +171,7 @@ render_map(
 render_map(
     precincts_ak, "splitticket_lb",
     "Lower-bound Peltola-Trump crossover voters per precinct (count)",
-    cmap="viridis", diverging=False,
+    cmap="viridis",
     outfile=MAPS / "splitticket_density.png",
 )
         """.strip(),
@@ -246,22 +253,23 @@ wgs = wgs[~wgs.geometry.is_empty & wgs.geometry.notna()].copy()
 for col in ["peltola_pct_r1", "harris_pct", "trump_pct", "overperformance_pp"]:
     wgs[col] = wgs[col].round(2)
 
-bound_pp = max(abs(wgs["overperformance_pp"].min()),
-               abs(wgs["overperformance_pp"].max()))
+# Match the static map's clipped ±(2 × median) bound (see earlier cell).
+bound_pp = round(2 * wgs["overperformance_pp"].median(), 1)
 pp_scale = cm.LinearColormap(
     ["#b2182b", "#f7f7f7", "#2166ac"],
     vmin=-bound_pp, vmax=bound_pp,
-    caption="Peltola R1 % − Harris % (percentage points)",
+    caption=f"Peltola R1 % − Harris % (pp; scale clipped at ±{bound_pp})",
 )
 
 def style_fn(feature):
     v = feature["properties"].get("overperformance_pp")
-    return {
-        "fillColor": "#bbbbbb" if v is None else pp_scale(v),
-        "color": "#ffffff",
-        "weight": 0.3,
-        "fillOpacity": 0.75,
-    }
+    if v is None:
+        fill = "#bbbbbb"
+    else:
+        # Clip to the colormap's domain so branca returns an endpoint color
+        # instead of extrapolating on the tail-distribution precincts.
+        fill = pp_scale(max(-bound_pp, min(bound_pp, v)))
+    return {"fillColor": fill, "color": "#ffffff", "weight": 0.3, "fillOpacity": 0.75}
 
 tooltip_fields = [
     "precinct_name", "house_district",
